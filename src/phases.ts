@@ -2672,7 +2672,7 @@ export class MoveEffectPhase extends PokemonPhase {
     this.targets = targets;
   }
 
-  start() {
+  async start() {
     super.start();
 
     const user = this.getUserPokemon();
@@ -2685,127 +2685,114 @@ export class MoveEffectPhase extends PokemonPhase {
     const overridden = new Utils.BooleanHolder(false);
 
     // Assume single target for override
-    applyMoveAttrs(OverrideMoveEffectAttr, user, this.getTarget(), this.move.getMove(), overridden, this.move.virtual).then(() => {
+    await applyMoveAttrs(OverrideMoveEffectAttr, user, this.getTarget(), this.move.getMove(), overridden, this.move.virtual);
 
-      if (overridden.value) {
-        return this.end();
+    if (overridden.value) {
+      return this.end();
+    }
+
+    user.lapseTags(BattlerTagLapseType.MOVE_EFFECT);
+
+    if (user.turnData.hitsLeft === undefined) {
+      const hitCount = new Utils.IntegerHolder(1);
+      // Assume single target for multi hit
+      await applyMoveAttrs(MultiHitAttr, user, this.getTarget(), this.move.getMove(), hitCount);
+      if (this.move.getMove() instanceof AttackMove && !this.move.getMove().getAttrs(FixedDamageAttr).length) {
+        this.scene.applyModifiers(PokemonMultiHitModifier, user.isPlayer(), user, hitCount, new Utils.IntegerHolder(0));
       }
+      user.turnData.hitsLeft = user.turnData.hitCount = hitCount.value;
+    }
 
-      user.lapseTags(BattlerTagLapseType.MOVE_EFFECT);
+    const moveHistoryEntry = { move: this.move.moveId, targets: this.targets, result: MoveResult.PENDING, virtual: this.move.virtual };
+    user.pushMoveHistory(moveHistoryEntry);
 
-      if (user.turnData.hitsLeft === undefined) {
-        const hitCount = new Utils.IntegerHolder(1);
-        // Assume single target for multi hit
-        applyMoveAttrs(MultiHitAttr, user, this.getTarget(), this.move.getMove(), hitCount);
-        if (this.move.getMove() instanceof AttackMove && !this.move.getMove().getAttrs(FixedDamageAttr).length) {
-          this.scene.applyModifiers(PokemonMultiHitModifier, user.isPlayer(), user, hitCount, new Utils.IntegerHolder(0));
-        }
-        user.turnData.hitsLeft = user.turnData.hitCount = hitCount.value;
+    const targetHitChecks = Object.fromEntries(targets.map(p => [ p.getBattlerIndex(), this.hitCheck(p) ]));
+    const activeTargets = targets.map(t => t.isActive(true));
+    if (!activeTargets.length || (!this.move.getMove().getAttrs(VariableTargetAttr).length && !this.move.getMove().isMultiTarget() && !targetHitChecks[this.targets[0]])) {
+      user.turnData.hitCount = 1;
+      user.turnData.hitsLeft = 1;
+      if (activeTargets.length) {
+        this.scene.queueMessage(getPokemonMessage(user, "'s\nattack missed!"));
+        moveHistoryEntry.result = MoveResult.MISS;
+        await applyMoveAttrs(MissEffectAttr, user, null, this.move.getMove());
+      } else {
+        this.scene.queueMessage(i18next.t("battle:attackFailed"));
+        moveHistoryEntry.result = MoveResult.FAIL;
       }
+      return this.end();
+    }
 
-      const moveHistoryEntry = { move: this.move.moveId, targets: this.targets, result: MoveResult.PENDING, virtual: this.move.virtual };
-      user.pushMoveHistory(moveHistoryEntry);
-
-      const targetHitChecks = Object.fromEntries(targets.map(p => [ p.getBattlerIndex(), this.hitCheck(p) ]));
-      const activeTargets = targets.map(t => t.isActive(true));
-      if (!activeTargets.length || (!this.move.getMove().getAttrs(VariableTargetAttr).length && !this.move.getMove().isMultiTarget() && !targetHitChecks[this.targets[0]])) {
-        user.turnData.hitCount = 1;
-        user.turnData.hitsLeft = 1;
-        if (activeTargets.length) {
+    // Move animation only needs one target
+    new MoveAnim(this.move.getMove().id as Moves, user, this.getTarget()?.getBattlerIndex()).play(this.scene, async () => {
+      for (const target of targets) {
+        if (!targetHitChecks[target.getBattlerIndex()]) {
+          user.turnData.hitCount = 1;
+          user.turnData.hitsLeft = 1;
           this.scene.queueMessage(getPokemonMessage(user, "'s\nattack missed!"));
-          moveHistoryEntry.result = MoveResult.MISS;
-          applyMoveAttrs(MissEffectAttr, user, null, this.move.getMove());
-        } else {
-          this.scene.queueMessage(i18next.t("battle:attackFailed"));
-          moveHistoryEntry.result = MoveResult.FAIL;
-        }
-        return this.end();
-      }
-
-      const applyAttrs: Promise<void>[] = [];
-
-      // Move animation only needs one target
-      new MoveAnim(this.move.getMove().id as Moves, user, this.getTarget()?.getBattlerIndex()).play(this.scene, () => {
-        for (const target of targets) {
-          if (!targetHitChecks[target.getBattlerIndex()]) {
-            user.turnData.hitCount = 1;
-            user.turnData.hitsLeft = 1;
-            this.scene.queueMessage(getPokemonMessage(user, "'s\nattack missed!"));
-            if (moveHistoryEntry.result === MoveResult.PENDING) {
-              moveHistoryEntry.result = MoveResult.MISS;
-            }
-            applyMoveAttrs(MissEffectAttr, user, null, this.move.getMove());
-            continue;
+          if (moveHistoryEntry.result === MoveResult.PENDING) {
+            moveHistoryEntry.result = MoveResult.MISS;
           }
-
-          const isProtected = !this.move.getMove().hasFlag(MoveFlags.IGNORE_PROTECT) && target.findTags(t => t instanceof ProtectedTag).find(t => target.lapseTag(t.tagType));
-
-          const firstHit = moveHistoryEntry.result !== MoveResult.SUCCESS;
-
-          moveHistoryEntry.result = MoveResult.SUCCESS;
-
-          const hitResult = !isProtected ? target.apply(user, this.move) : HitResult.NO_EFFECT;
-
-          this.scene.triggerPokemonFormChange(user, SpeciesFormChangePostMoveTrigger);
-
-          applyAttrs.push(new Promise(resolve => {
-            applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.PRE_APPLY && (!attr.firstHitOnly || firstHit),
-              user, target, this.move.getMove()).then(() => {
-              if (hitResult !== HitResult.FAIL) {
-                const chargeEffect = !!this.move.getMove().getAttrs(ChargeAttr).find(ca => (ca as ChargeAttr).usedChargeEffect(user, this.getTarget(), this.move.getMove()));
-                // Charge attribute with charge effect takes all effect attributes and applies them to charge stage, so ignore them if this is present
-                Utils.executeIf(!chargeEffect, () => applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.POST_APPLY
-                  && (attr as MoveEffectAttr).selfTarget && (!attr.firstHitOnly || firstHit), user, target, this.move.getMove())).then(() => {
-                  if (hitResult !== HitResult.NO_EFFECT) {
-                    applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.POST_APPLY
-                      && !(attr as MoveEffectAttr).selfTarget && (!attr.firstHitOnly || firstHit), user, target, this.move.getMove()).then(() => {
-                      if (hitResult < HitResult.NO_EFFECT) {
-                        const flinched = new Utils.BooleanHolder(false);
-                        user.scene.applyModifiers(FlinchChanceModifier, user.isPlayer(), user, flinched);
-                        if (flinched.value) {
-                          target.addTag(BattlerTagType.FLINCHED, undefined, this.move.moveId, user.id);
-                        }
-                      }
-                      Utils.executeIf(!isProtected && !chargeEffect, () => applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.HIT && (!attr.firstHitOnly || firstHit),
-                        user, target, this.move.getMove()).then(() => {
-                        return Utils.executeIf(!target.isFainted() || target.canApplyAbility(), () => applyPostDefendAbAttrs(PostDefendAbAttr, target, user, this.move, hitResult).then(() => {
-                          if (!user.isPlayer() && this.move.getMove() instanceof AttackMove) {
-                            user.scene.applyShuffledModifiers(this.scene, EnemyAttackStatusEffectChanceModifier, false, target);
-                          }
-                        })).then(() => {
-                          applyPostAttackAbAttrs(PostAttackAbAttr, user, target, this.move, hitResult).then(() => {
-                            if (this.move.getMove() instanceof AttackMove) {
-                              this.scene.applyModifiers(ContactHeldItemTransferChanceModifier, this.player, user, target.getFieldIndex());
-                            }
-                            resolve();
-                          });
-                        });
-                      })
-                      ).then(() => resolve());
-                    });
-                  } else {
-                    applyMoveAttrs(NoEffectAttr, user, null, this.move.getMove()).then(() => resolve());
-                  }
-                });
-              } else {
-                resolve();
-              }
-            });
-          }));
+          await applyMoveAttrs(MissEffectAttr, user, null, this.move.getMove());
+          continue;
         }
-        // Trigger effect which should only apply one time after all targeted effects have already applied
-        const postTarget = applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.POST_TARGET,
-          user, null, this.move.getMove());
-
-        if (applyAttrs.length) { // If there is a pending asynchronous move effect, do this after
-          applyAttrs[applyAttrs.length - 1]?.then(() => postTarget);
-        } else { // Otherwise, push a new asynchronous move effect
-          applyAttrs.push(postTarget);
-        }
-
-        Promise.allSettled(applyAttrs).then(() => this.end());
-      });
+        await this.applyMoveEffect(user, target, moveHistoryEntry);
+      }
+      // Trigger effect which should only apply one time after all targeted effects have already applied
+      await applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.POST_TARGET,
+        user, null, this.move.getMove());
+      this.end();
     });
+  }
+
+  async applyMoveEffect(user, target, moveHistoryEntry): Promise<void> {
+    const isProtected = !this.move.getMove().hasFlag(MoveFlags.IGNORE_PROTECT) && target.findTags(t => t instanceof ProtectedTag).find(t => target.lapseTag(t.tagType));
+
+    const firstHit = moveHistoryEntry.result !== MoveResult.SUCCESS;
+
+    moveHistoryEntry.result = MoveResult.SUCCESS;
+
+    const hitResult = !isProtected ? target.apply(user, this.move) : HitResult.NO_EFFECT;
+
+    this.scene.triggerPokemonFormChange(user, SpeciesFormChangePostMoveTrigger);
+
+
+    await applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.PRE_APPLY && (!attr.firstHitOnly || firstHit),
+      user, target, this.move.getMove());
+    if (hitResult !== HitResult.FAIL) {
+      const chargeEffect = !!this.move.getMove().getAttrs(ChargeAttr).find(ca => (ca as ChargeAttr).usedChargeEffect(user, this.getTarget(), this.move.getMove()));
+      // Charge attribute with charge effect takes all effect attributes and applies them to charge stage, so ignore them if this is present
+      if (!chargeEffect) {
+        await applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.POST_APPLY
+          && (attr as MoveEffectAttr).selfTarget && (!attr.firstHitOnly || firstHit), user, target, this.move.getMove());
+      }
+      if (hitResult !== HitResult.NO_EFFECT) {
+        await applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.POST_APPLY
+          && !(attr as MoveEffectAttr).selfTarget && (!attr.firstHitOnly || firstHit), user, target, this.move.getMove());
+        if (hitResult < HitResult.NO_EFFECT) {
+          const flinched = new Utils.BooleanHolder(false);
+          user.scene.applyModifiers(FlinchChanceModifier, user.isPlayer(), user, flinched);
+          if (flinched.value) {
+            target.addTag(BattlerTagType.FLINCHED, undefined, this.move.moveId, user.id);
+          }
+        }
+        if (!isProtected && !chargeEffect) {
+          await applyFilteredMoveAttrs((attr: MoveAttr) => attr instanceof MoveEffectAttr && (attr as MoveEffectAttr).trigger === MoveEffectTrigger.HIT && (!attr.firstHitOnly || firstHit),
+            user, target, this.move.getMove());
+        }
+        if (!target.isFainted() || target.canApplyAbility()) {
+          await applyPostDefendAbAttrs(PostDefendAbAttr, target, user, this.move, hitResult);
+          if (!user.isPlayer() && this.move.getMove() instanceof AttackMove) {
+            user.scene.applyShuffledModifiers(this.scene, EnemyAttackStatusEffectChanceModifier, false, target);
+          }
+        }
+        await applyPostAttackAbAttrs(PostAttackAbAttr, user, target, this.move, hitResult);
+        if (this.move.getMove() instanceof AttackMove) {
+          this.scene.applyModifiers(ContactHeldItemTransferChanceModifier, this.player, user, target.getFieldIndex());
+        }
+      } else {
+        await applyMoveAttrs(NoEffectAttr, user, null, this.move.getMove());
+      }
+    }
   }
 
   end() {
