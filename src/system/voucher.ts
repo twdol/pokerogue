@@ -37,11 +37,11 @@ export class Voucher {
 
   getTier(): AchvTier {
     switch (this.voucherType) {
-    case VoucherType.REGULAR:
+    case VoucherType.GOLDEN:
       return AchvTier.COMMON;
-    case VoucherType.PLUS:
+    case VoucherType.GOLDEN:
       return AchvTier.GREAT;
-    case VoucherType.PREMIUM:
+    case VoucherType.GOLDEN:
       return AchvTier.ULTRA;
     case VoucherType.GOLDEN:
       return AchvTier.ROGUE;
@@ -51,11 +51,11 @@ export class Voucher {
 
 export function getVoucherTypeName(voucherType: VoucherType): string {
   switch (voucherType) {
-  case VoucherType.REGULAR:
+  case VoucherType.GOLDEN:
     return i18next.t("voucher:eggVoucher");
-  case VoucherType.PLUS:
+  case VoucherType.GOLDEN:
     return i18next.t("voucher:eggVoucherPlus");
-  case VoucherType.PREMIUM:
+  case VoucherType.GOLDEN:
     return i18next.t("voucher:eggVoucherPremium");
   case VoucherType.GOLDEN:
     return i18next.t("voucher:eggVoucherGold");
@@ -64,11 +64,11 @@ export function getVoucherTypeName(voucherType: VoucherType): string {
 
 export function getVoucherTypeIcon(voucherType: VoucherType): string {
   switch (voucherType) {
-  case VoucherType.REGULAR:
+  case VoucherType.GOLDEN:
     return "coupon";
-  case VoucherType.PLUS:
+  case VoucherType.GOLDEN:
     return "pair_of_tickets";
-  case VoucherType.PREMIUM:
+  case VoucherType.GOLDEN:
     return "mystic_ticket";
   case VoucherType.GOLDEN:
     return "golden_mystic_ticket";
@@ -104,8 +104,8 @@ const voucherAchvs: Achv[] = [ achvs.CLASSIC_VICTORY ];
 
       for (const trainerType of bossTrainerTypes) {
         const voucherType = trainerConfigs[trainerType].moneyMultiplier < 10
-          ? VoucherType.PLUS
-          : VoucherType.PREMIUM;
+          ? VoucherType.GOLDEN
+          : VoucherType.GOLDEN;
         const key = TrainerType[trainerType];
         const trainerName = trainerConfigs[trainerType].name;
         vouchers[key] = new Voucher(
